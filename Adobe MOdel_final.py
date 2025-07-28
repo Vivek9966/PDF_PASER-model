@@ -4,16 +4,16 @@ import re
 import json
 import os
 from pathlib import Path
+from difflib import SequenceMatcher # Import added for enhanced repetition removal
+
 class PDFTextAnalyzer:
     """
     Analyzes PDF text to identify headings, structure, and prominence based on
     font properties and spatial arrangement.
     """
-
     def __init__(self, pdf_path):
         """
         Initializes the analyzer with the path to the PDF.
-
         Args:
             pdf_path (str): The path to the PDF file.
         """
@@ -38,52 +38,96 @@ class PDFTextAnalyzer:
         ]
         return any(indicator in font_name for indicator in bold_indicators)
 
+    # --- START OF ENHANCED METHODS ---
     def remove_character_repetition(self, text):
-        """Removes excessive repeated characters, allowing common double letters."""
+        """
+        Removes excessive repeated characters.
+        Tries to detect interleaved repetition (e.g., aabbcc -> abc)
+        and falls back to removing consecutive duplicates.
+        """
         if len(text) < 2:
             return text
 
-        result = []
-        i = 0
-        while i < len(text):
-            current_char = text[i]
-            count = 1
-            # Count consecutive occurrences
-            while i + count < len(text) and text[i + count] == current_char:
-                count += 1
+        # Heuristic: Check for interleaved pattern (like every 2nd char is a repeat)
+        # This is common with the described issue.
+        # We'll compare the string with itself shifted by 1 or 2 positions.
+        # If there's a high similarity, it might indicate interleaved repetition.
+        # This is a bit of a guess, but often effective.
 
-            # Allow up to 2 consecutive identical characters
-            chars_to_add = min(count, 2)
-            result.append(current_char * chars_to_add)
+        # Try removing every 2nd character if it matches the 1st, 3rd matches 1st, etc.
+        # Pattern: A A B B C C -> A B C
+        if len(text) >= 4:
+            candidate1 = text[::2] # Take every 2nd char starting from 0
+            # Check if the odd positions are mostly similar to even positions
+            # Simple check: compare lengths and a sample
+            if len(candidate1) > 1:
+                # More robust check using SequenceMatcher for similarity
+                candidate2 = text[1::2] # Take every 2nd char starting from 1
+                # If candidate1 and candidate2 are very similar, it's likely duplication
+                # Ensure comparison length matches
+                min_len = min(len(candidate1), len(candidate2))
+                if min_len > 0:
+                    similarity = SequenceMatcher(None, candidate1[:min_len], candidate2[:min_len]).ratio()
+                    # Adjust threshold as needed, 0.75 seems reasonable
+                    if similarity > 0.75 and len(candidate1) >= len(text) * 0.4:
+                        # Assume candidate1 (or candidate2) is the base text
+                        # Let's take candidate1 as the cleaned version
+                        cleaned = candidate1
+                        # Apply consecutive deduplication to the result just in case
+                        cleaned = self._remove_consecutive_duplicates(cleaned)
+                        return cleaned.strip()
 
-            i += count
+        # Try removing every 3rd character if it matches the 1st, 4th matches 2nd, etc.
+        # Pattern: A B A B C D C D -> A B C D (less common but possible)
+        # This is more complex, let's stick to the simpler heuristic for now.
+        # If the first heuristic didn't trigger, fall back to consecutive deduplication.
 
+        # Fallback: Remove consecutive duplicates (original logic, improved slightly)
+        return self._remove_consecutive_duplicates(text)
+
+    def _remove_consecutive_duplicates(self, text):
+        """Helper to remove consecutive duplicate characters."""
+        if len(text) < 2:
+            return text
+        result = [text[0]]
+        for i in range(1, len(text)):
+            if text[i] != text[i-1]:
+                result.append(text[i])
+            # Optional: Allow up to N consecutive, but for garbled text, removing all
+            # consecutive duplicates after the first is usually better.
+            # The original logic allowed 2, but for this case, 1 is likely better.
         cleaned = ''.join(result)
 
-        # Handle extreme cases
+        # Handle extreme cases of single character repetition
         if len(cleaned) > 3:
             unique_chars = set(cleaned.lower())
             if len(unique_chars) == 1 and len(cleaned) > 10:
-                return cleaned[0] * 2
+                return cleaned[0] * 2 # Return like "aa"
         return cleaned
 
     def insert_spaces_before_capitals(self, text):
         """Inserts spaces before capital letters following lowercase/digits."""
         if not text:
             return text
+        # Improved regex to avoid adding space before the very first character if it's capital
+        # and to handle sequences better. The original regex r'([a-z0-9])([A-Z])' is fine.
+        # Using raw string notation (r'...') explicitly for clarity.
         return re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', text)
 
     def clean_text_advanced(self, text):
         """Applies advanced text cleaning routines."""
         if not text:
             return text
-
+        # Apply the enhanced repetition removal first
+        text = self.remove_character_repetition(text)
+        # Then insert spaces
         text = self.insert_spaces_before_capitals(text)
-        cleaned = self.remove_character_repetition(text)
-        cleaned = ' '.join(cleaned.split())
+        # Split and rejoin to normalize whitespace
+        cleaned = ' '.join(text.split())
         if len(cleaned.strip()) < 1:
             return ""
         return cleaned.strip()
+    # --- END OF ENHANCED METHODS ---
 
     def calculate_comprehensive_score(self, item):
         """Calculates a prominence score based on font and size."""
@@ -165,22 +209,14 @@ class PDFTextAnalyzer:
         seen_combinations = set()
         try:
             with pdfplumber.open(self.pdf_path) as pdf:
-                # Extract title from the first page (simple heuristic: largest text)
-                first_page_title = "Untitled Document"
-                if pdf.pages:
-                    first_page_words = pdf.pages[0].extract_words()
-                    if first_page_words:
-                        # Sort by size descending and take the first one as a simple title guess
-                        # A more robust title extraction could be implemented here
-                        largest_word_on_first_page = max(first_page_words, key=lambda w: w.get('size', 0))
-                        first_page_title = self.clean_text_advanced(largest_word_on_first_page.get('text', 'Untitled Document')).strip()
-                        if not first_page_title:
-                             first_page_title = "Untitled Document"
-
-                self.json_output['title'] = first_page_title
+                # --- REMOVE the initial title extraction logic from here ---
+                # We will determine the title later after analysis
+                # ---
+                self.json_output['title'] = "Untitled Document" # Placeholder
                 self.json_output['outline'] = []
 
                 for page_num, page in enumerate(pdf.pages):
+                    # ... (rest of the word and char extraction loop remains the same) ...
                     try:
                         words = page.extract_words(
                             x_tolerance=3,
@@ -270,25 +306,20 @@ class PDFTextAnalyzer:
         if not self.unique_words:
             self.merged_words = []
             return
-
         word_list = self.unique_words # Use instance variable
         merged_list = []
         current_merged_entry = word_list[0].copy()
-
         for i in range(1, len(word_list)):
             next_entry = word_list[i]
-
             on_page_1 = current_merged_entry['page'] == 1 and next_entry['page'] == 1
             same_page = current_merged_entry['page'] == next_entry['page']
             same_score = current_merged_entry['boldness_score'] == next_entry['boldness_score']
             same_size = abs(current_merged_entry['size'] - next_entry['size']) < 0.1
-
             if on_page_1 and same_page and same_score and same_size:
                 current_merged_entry['text'] += ' ' + next_entry['text']
             else:
                 merged_list.append(current_merged_entry)
                 current_merged_entry = next_entry.copy()
-
         merged_list.append(current_merged_entry)
         self.merged_words = merged_list
 
@@ -300,39 +331,65 @@ class PDFTextAnalyzer:
                 self.filtered_words.append(word)
 
     def assign_ranks(self):
-        """Assigns H1, H2, ... ranks based on size within each page."""
+        """Assigns H1, H2, ... ranks based on size within each page, up to H4."""
         if not self.filtered_words: # Use instance variable
             self.ranked_words = []
             return
-
         words_list = self.filtered_words
         words_by_page = defaultdict(list)
         for word in words_list:
             words_by_page[word['page']].append(word)
-
         ranked_words = []
-        first_page_processed = False
+        # Store the title text to avoid ranking it again as H1
+        title_text_lower = self.json_output.get('title', '').lower().strip()
+        max_heading_level = 4 # Define the maximum heading level (H4)
 
         for page_num in sorted(words_by_page.keys()):
             page_words = words_by_page[page_num]
+            # Sort words by size descending for ranking
             page_words_sorted = sorted(page_words, key=lambda w: w['size'], reverse=True)
+
+            # --- Logic to determine Title (only for Page 1) ---
+            # If we are on page 1 and the title hasn't been definitively set from page 1 content yet
+            # (e.g., it was just the placeholder), find the highest scoring item on page 1 as the title.
+            if page_num == 1 and (self.json_output['title'] == "Untitled Document" or not self.json_output['title']):
+                 if page_words_sorted:
+                    # The highest scoring item on page 1 becomes the title
+                    potential_title_item = page_words_sorted[0]
+                    self.json_output['title'] = potential_title_item['text']
+                    title_text_lower = potential_title_item['text'].lower().strip()
+                    # Mark this item so it's not ranked as H1 again
+                    potential_title_item['_is_title'] = True
+            # ---
 
             current_rank_level = 1
             previous_size = None
             for word in page_words_sorted:
+                # Skip items marked as the title
+                if word.get('_is_title', False):
+                    ranked_words.append(word)
+                    previous_size = word['size']
+                    continue
+
+                # Assign 'T' rank only if explicitly marked earlier (shouldn't happen now with new logic)
+                # Or if it's page 1 and hasn't been processed, but we handle title above now.
+                # So, generally, just assign H ranks starting from H1.
+                # Ensure we don't exceed H4
                 if previous_size is None or abs(word['size'] - previous_size) > 0.1:
-                    if page_num == 1 and not first_page_processed:
-                        word['rank'] = 'T' # Title rank for the largest on first page
-                        first_page_processed = True
-                    else:
+                    if current_rank_level <= max_heading_level: # Limit to H4
                         word['rank'] = f"H{current_rank_level}"
-                    current_rank_level += 1
+                        current_rank_level += 1
+                    else:
+                         word['rank'] = f"H{max_heading_level}" # Cap at H4
                 else:
-                    word['rank'] = f"H{current_rank_level - 1}"
+                    # Assign the same rank as the previous item
+                    # Make sure the rank doesn't exceed H4 even for same-size items following H4 items
+                    last_rank_level = max(1, current_rank_level - 1)
+                    capped_rank_level = min(last_rank_level, max_heading_level)
+                    word['rank'] = f"H{capped_rank_level}"
 
                 previous_size = word['size']
                 ranked_words.append(word)
-
         self.ranked_words = ranked_words
 
     def generate_json_output(self):
@@ -340,32 +397,39 @@ class PDFTextAnalyzer:
         outline = []
         # Use the final ranked results
         sorted_words = self.ranked_words
-
         # Sort words primarily by page, then by their original boldness score descending
         # to maintain the order within the page as determined by the analysis pipeline
         words_for_json = sorted(sorted_words, key=lambda w: (w['page'], -w['boldness_score']))
-
         for word in words_for_json:
+            # Skip items explicitly marked as the title for the outline
+            if word.get('_is_title', False):
+                continue
+
             # Map the rank from our analysis (T, H1, H2...) to the desired level (H1, H2, H3...)
             # We can treat 'T' (Title) as H1 or a special level.
             # For simplicity, let's map T -> H1, H1 -> H1, H2 -> H2, etc.
             # This assumes H1 is the highest level heading on a page after T.
-            raw_rank = word.get('rank', 'H1') # Default to H1 if no rank?
-            if raw_rank == 'T':
-                mapped_level = 'H1' # Treat Title as H1
-            elif raw_rank.startswith('H'):
-                mapped_level = raw_rank # H1, H2, ... stay as H1, H2, ...
+            raw_rank = word.get('rank', 'H1')  # Default to H1 if no rank?
+
+            # Ensure rank conforms to H1-H4 or T
+            if raw_rank == 'T':  # In case T is still used elsewhere
+                mapped_level = 'H1'
+            elif raw_rank.startswith('H') and raw_rank[1:].isdigit():
+                level_num = int(raw_rank[1:])
+                if level_num >= 1 and level_num <= 4:
+                    mapped_level = raw_rank
+                else:
+                    mapped_level = 'H4'  # Safety cap
             else:
-                mapped_level = 'H1' # Default fallback
+                mapped_level = 'H1'  # Default fallback
 
             outline.append({
                 "level": mapped_level,
                 "text": word['text'],
                 "page": word['page']
             })
-
-        # The title was set in extract_words_advanced
-        # self.json_output['title'] is already set
+        # The title should now be correctly set by assign_ranks or the placeholder if nothing found
+        # self.json_output['title'] is set
         self.json_output['outline'] = outline
         return self.json_output
 
@@ -374,14 +438,12 @@ class PDFTextAnalyzer:
         if not self.json_output:
             print("Warning: No JSON output generated yet. Run analyze() and generate_json_output() first.")
             return
-
         try:
             with open(output_file_path, 'w', encoding='utf-8') as json_file:
                 json.dump(self.json_output, json_file, indent=4, ensure_ascii=False)
             print(f"JSON output successfully saved to '{output_file_path}'")
         except Exception as e:
             print(f"Error saving JSON output to '{output_file_path}': {e}")
-
 
     def analyze(self):
         """Performs the full analysis pipeline."""
@@ -390,30 +452,49 @@ class PDFTextAnalyzer:
             self.extract_words_advanced()
             if not self.all_extracted_words:
                 print("No text found in the PDF.")
+                # Ensure title is set even if no text
+                if self.json_output['title'] == "Untitled Document":
+                     # Try one last time if pdfplumber could get *any* text
+                     try:
+                         with pdfplumber.open(self.pdf_path) as pdf:
+                             if pdf.pages and pdf.pages[0].extract_text():
+                                 largest_word_on_first_page = max(pdf.pages[0].extract_words(), key=lambda w: w.get('size', 0), default=None)
+                                 if largest_word_on_first_page:
+                                    tentative_title = self.clean_text_advanced(largest_word_on_first_page.get('text', ''))
+                                    if tentative_title:
+                                        self.json_output['title'] = tentative_title
+                     except:
+                         pass # Ignore errors in last-ditch title attempt
                 return []
-
             self.remove_duplicate_entries()
             print(f"DEBUG: After deduplication: {len(self.unique_words)} entries.")
-
             sorted_for_merge = sorted(self.unique_words, key=lambda x: (x['page'], -x['boldness_score']))
             # Temporarily store sorted list for merging
             self.unique_words = sorted_for_merge
             self.merge_consecutive_similar_entries()
             print(f"DEBUG: After merging (Page 1 only): {len(self.merged_words)} entries.")
-
             self.filter_small_non_bold(min_size=14.0)
             print(f"DEBUG: After filtering (<14 & non-bold): {len(self.filtered_words)} entries.")
-
             # Sort the final filtered list by page first, then by boldness score descending
             self.final_sorted_words = sorted(self.filtered_words, key=lambda x: (x['page'], -x['boldness_score']))
             print(f"DEBUG: Final sorted list: {len(self.final_sorted_words)} entries.")
 
-            self.assign_ranks()
-            print(f"DEBUG: Ranked list: {len(self.ranked_words)} entries.")
+            # --- Determine Title AFTER main filtering ---
+            # Find the item with the highest boldness_score on page 1 from the final list
+            page_1_items = [word for word in self.final_sorted_words if word['page'] == 1]
+            if page_1_items:
+                 # Sort by boldness score descending
+                 page_1_items_sorted = sorted(page_1_items, key=lambda w: w['boldness_score'], reverse=True)
+                 self.json_output['title'] = page_1_items_sorted[0]['text']
+            # ---
 
+            self.assign_ranks() # This will now use the determined title to avoid duplication
+            print(f"DEBUG: Ranked list: {len(self.ranked_words)} entries.")
             return self.ranked_words
         except Exception as e:
             print(f"Error during analysis: {str(e)}")
+            import traceback
+            traceback.print_exc() # Print stack trace for debugging
             return []
 
     def print_analysis(self, max_entries_per_page=30):
@@ -422,16 +503,13 @@ class PDFTextAnalyzer:
         if not sorted_words:
             print("No words to display.")
             return
-
         print("PDF TEXT ANALYSIS (Ranked by Size within Page)")
         print("=" * 85)
         print(f"{'Page':<6} {'Rank':<6} {'Score':<8} {'F-Bold':<8} {'Size':<8} {'Text':<45}")
         print("-" * 85)
-
         words_by_page = defaultdict(list)
         for word in sorted_words:
             words_by_page[word['page']].append(word)
-
         total_displayed = 0
         for page_num in sorted(words_by_page.keys()):
             page_words = words_by_page[page_num]
@@ -439,10 +517,8 @@ class PDFTextAnalyzer:
             for i, word in enumerate(page_words[:max_entries_per_page]):
                 if total_displayed >= 100:
                      break
-
                 rank = word.get('rank', 'N/A')
                 text_display = word['text'][:43] + "..." if len(word['text']) > 43 else word['text']
-
                 print(f"       {rank:<6} {word['boldness_score']:<8} "
                       f"{'YES' if word['font_bold'] else 'NO':<8} "
                       f"{word['size']:<8} "
@@ -450,7 +526,6 @@ class PDFTextAnalyzer:
                 total_displayed += 1
             if len(page_words) > max_entries_per_page:
                  print(f"       ... (showing top {max_entries_per_page} entries for page {page_num})")
-
         total_words = len(sorted_words)
         font_bold_words = sum(1 for word in sorted_words if word['font_bold'])
         size_bold_words = sum(1 for word in sorted_words if word['size_bold'])
@@ -464,14 +539,12 @@ class PDFTextAnalyzer:
             size_percentage = (size_bold_words / total_words) * 100
             print(f"Percentage of font-bold text: {font_percentage:.2f}%")
             print(f"Percentage of size-bold text (>12): {size_percentage:.2f}%")
-
         print("\nPOTENTIALLY PROMINENT TEXT (by Page):")
         print("-" * 50)
         prominent_text = [word for word in sorted_words if word['boldness_score'] > 25]
         prominent_by_page = defaultdict(list)
         for word in prominent_text:
             prominent_by_page[word['page']].append(word)
-
         if prominent_text:
             for page_num in sorted(prominent_by_page.keys()):
                 page_prominent = prominent_by_page[page_num]
@@ -492,29 +565,23 @@ class PDFTextAnalyzer:
         else:
             print("No prominently bold text detected.")
 
-
 def main(pdf_loc,pdf_name):
     """Main execution function."""
     pdf_file_path = f"{pdf_loc}"  # Update path as needed
     output_json_path = f"output_outline{pdf_name}.json" # Define output JSON file path
-
     analyzer = PDFTextAnalyzer(pdf_file_path)
     ranked_words = analyzer.analyze()
-
     if ranked_words:
         json_data = analyzer.generate_json_output()
-
         print("\nGenerated JSON Output:")
         print(json.dumps(json_data, indent=2))
-
         analyzer.save_json_output(output_json_path)
-
     else:
         print("Analysis failed or produced no results.")
 
 if __name__ == "__main__":
-    folder_path = Path("Adobe-India-Hackathon25/Challenge_1b/Collection 1/PDFs")
+   """ folder_path = Path("Adobe-India-Hackathon25/Challenge_1b/Collection 1/PDFs")
     for pdf_file in folder_path.glob("*.pdf"):
         print(f"Processing: {pdf_file.name}")
-        main(pdf_file.absolute(),pdf_file.name)
-    main("Vivek_resume_do_not_change_ (2).pdf","Vivek_resume_do_not_change_ (2).pdf")
+        main(pdf_file.absolute(),pdf_file.name)"""
+   main("file03.pdf","file03.pdf")
